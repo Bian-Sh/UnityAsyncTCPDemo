@@ -30,7 +30,7 @@ public class PlayerServer : MonoBehaviour
         EventManager.AddListener(Command.PlayList, OnPlayListResponse);
 
         player.targetTexture.Release();
-        var _ = TCPServer.Listen();
+        var _ = TCPServer.ListenAsync();
     }
 
     private void OnPlayListResponse(string obj)

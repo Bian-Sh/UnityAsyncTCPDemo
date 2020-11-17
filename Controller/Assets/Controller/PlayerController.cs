@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Cysharp.Threading.Tasks;
+using System;
 using System.Linq;
 using System.Net.Sockets;
 using System.Text;
@@ -19,6 +20,10 @@ public class PlayerController : MonoBehaviour
     private string currentPlayFile;
     TcpClient tcpClient;
     bool isRun = false;
+
+
+    CircularBuffer recvbuffer = new CircularBuffer();
+    PacketParser recvparser;
     async void Start()
     {
         playAndPause.onClick.AddListener(OnPlayAndPauseButtonClicked);
@@ -38,6 +43,7 @@ public class PlayerController : MonoBehaviour
     {
         isRun = true;
         tcpClient = new TcpClient();
+        recvparser = new PacketParser(recvbuffer);
         tcpClient.NoDelay = true;
         try
         {
@@ -59,13 +65,24 @@ public class PlayerController : MonoBehaviour
         {
             while (isRun && tcpClient.Connected)
             {
-                var networkStream = tcpClient.GetStream();
-                var buffer = new byte[4096];
-                var byteCount = await networkStream.ReadAsync(buffer, 0, buffer.Length);
-                if (byteCount == 0) break;//服务器端口
-                var response = Encoding.UTF8.GetString(buffer, 0, byteCount);
-                Debug.Log($"[控制器] 接收到播放器消息 {response}!");
-                UnitySynchronizationContext.Post(() => EventManager.Invoke(JsonUtility.FromJson<Message>(response)));
+                var stream = tcpClient.GetStream();
+                await recvbuffer.WriteAsync(stream);
+                bool isOK = this.recvparser.Parse();
+                if (isOK)
+                {
+                    Packet packet = this.recvparser.GetPacket();
+                    var request = Encoding.UTF8.GetString(packet.Bytes, 0, packet.Length);
+                    Debug.Log($"[控制器] 接收到播放器消息 {request}!");
+                    await UniTask.Yield();
+                    try
+                    {
+                        EventManager.Invoke(JsonUtility.FromJson<Message>(request)); // 这里必须使用Try catch ，避免这条语句触发异常被外部捕捉而导致网络意外断开
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.Log($"{nameof(PlayerController)}: {e}");
+                    }
+                }
             }
         }
         catch (Exception e)
@@ -83,8 +100,12 @@ public class PlayerController : MonoBehaviour
             if (null != tcpClient && tcpClient.Connected)
             {
                 var networkStream = tcpClient.GetStream();
-                var ClientRequestBytes = Encoding.UTF8.GetBytes(str);
-                networkStream.Write(ClientRequestBytes, 0, ClientRequestBytes.Length);
+                var data = Encoding.UTF8.GetBytes(str);
+                byte[] size = BytesHelper.GetBytes((ushort)data.Length);
+                var temp = new byte[size.Length + data.Length];
+                Buffer.BlockCopy(size, 0, temp, 0, size.Length);
+                Buffer.BlockCopy(data, 0, temp, size.Length, data.Length);
+                networkStream.Write(temp, 0, temp.Length);
                 networkStream.Flush();
                 Debug.Log($"[控制器] 发送到播放器消息 {str}!");
                 UnitySynchronizationContext.Post(() => { if (message) message.text = $"[控制器] 发送到播放器消息 {str}!"; });
