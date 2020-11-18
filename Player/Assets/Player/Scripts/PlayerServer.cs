@@ -4,9 +4,10 @@ using UnityEngine;
 using UnityEngine.Video;
 using System.Linq;
 using Shell32;
-using UnityEngine.SceneManagement;
 using System.Net;
 using System.Text;
+using System.Net.Sockets;
+using System.Threading.Tasks;
 
 public class PlayerServer : MonoBehaviour
 {
@@ -30,13 +31,21 @@ public class PlayerServer : MonoBehaviour
         EventManager.AddListener(Command.PlayList, OnPlayListResponse);
 
         player.targetTexture.Release();
-        var _ = TCPServer.ListenAsync();
+        TCPServer.OnClientConnected.AddListener(OnClientConnected);
+        _ = Task.Run(TCPServer.ListenAsync); //此处务必使用 Task 执行，否则这个Awake 方法会回不到主线程，如果下面还有逻辑也不会执行咯
+    }
+
+
+    private void OnClientConnected(TcpClient arg0) 
+    {
+        string pl = JsonUtility.ToJson(playList);
+        Message message = new Message { command = Command.PlayList, cmdContext = pl };
+        TCPServer.SendMessageToClient(arg0,Encoding.UTF8.GetBytes(JsonUtility.ToJson(message))); 
     }
 
     private void OnPlayListResponse(string obj)
     {
         Debug.Log("[播放器] 向控制器发送播放列表");
-        Message msg = JsonUtility.FromJson<Message>(obj);
         string pl = JsonUtility.ToJson(playList);
         Message message = new Message { command = Command.PlayList, cmdContext = pl };
         TCPServer.BroadcastToClients(Encoding.UTF8.GetBytes(JsonUtility.ToJson(message)));
@@ -125,6 +134,7 @@ public class PlayerServer : MonoBehaviour
     }
     private void OnDestroy()
     {
+        TCPServer?.OnClientConnected.RemoveListener(OnClientConnected);
         TCPServer?.Stop();
     }
 }

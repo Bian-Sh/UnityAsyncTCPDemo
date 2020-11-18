@@ -12,6 +12,7 @@ using Cysharp.Threading.Tasks;
 
 public class TCPServer : IDisposable
 {
+    #region 事件
     /// <summary>
     /// 当有客户端连接上时触发
     /// </summary>
@@ -21,6 +22,8 @@ public class TCPServer : IDisposable
     /// </summary>
     public UnityEvent OnServiceClosed = new UnityEvent();
     public class TCPServerEvent : UnityEvent<TcpClient> { }
+    #endregion
+
 
     CircularBuffer recvbuffer = new CircularBuffer();
     PacketParser recvparser;
@@ -55,9 +58,9 @@ public class TCPServer : IDisposable
             try
             {
                 var client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
-                var _ = Task.Run(() => OnConnectClient(client));
+                _ = Task.Run(() => OnConnectClientAsync(client));
                 await UniTask.Yield(); //通过该语句，程序将返回主线程上下文，其他地方一个意思
-                OnClientConnected.Invoke(client);
+                OnClientConnected.Invoke(client); 
             }
             catch (ObjectDisposedException e)// thrown if the listener socket is closed
             {
@@ -77,14 +80,7 @@ public class TCPServer : IDisposable
 
     public void Stop()
     {
-        lock (this)
-        {
-            if (listener == null)
-                throw new InvalidOperationException("Not started");
-            acceptLoop = false;
-            listener.Stop();
-            listener = null;
-        }
+        //先通知在线的客户端
         lock (clients)
         {
             foreach (var c in clients)
@@ -93,16 +89,25 @@ public class TCPServer : IDisposable
             }
             clients.Clear();
         }
+        //然后关断自身
+        lock (this)
+        {
+            if (listener == null)
+                throw new InvalidOperationException("Not started");
+            acceptLoop = false;
+            listener.Stop();
+            listener = null;
+        }
     }
 
-    async Task OnConnectClient(TcpClient client)
+    async Task OnConnectClientAsync(TcpClient client)
     {
         var clientEndpoint = client.Client.RemoteEndPoint;
         Debug.Log($"完成握手 {clientEndpoint}");
         clients.Add(client);
         try
         {
-            await NetworkStreamHandler(client); //但连接断开时，stream 会抛出dispose相关异常
+            await HandleNetworkStreamAsync(client); //连接断开时，stream 会抛出dispose相关异常,捕获避免向上传递中断了监听。
         }
         catch (Exception e)
         {
@@ -110,21 +115,20 @@ public class TCPServer : IDisposable
         }
         finally
         {
-            Debug.Log($"连接断开 {clientEndpoint.ToString()}");
+            Debug.Log($"连接断开 {clientEndpoint}"); 
             clients.Remove(client);
         }
     }
 
 
-    async Task NetworkStreamHandler(TcpClient client)
+    async Task HandleNetworkStreamAsync(TcpClient client)
     {
-        while (client.Connected)
+        while (client.IsOnline())  
         {
             var stream = client.GetStream();
-            await recvbuffer.WriteAsync(stream);
-            var buffer = new byte[4096];
-            var byteCount = await stream.ReadAsync(buffer, 0, buffer.Length);
+            var byteCount = await recvbuffer.WriteAsync(stream);
             stream.Flush();
+            if (byteCount == 0) break;//断线了
             bool isOK = this.recvparser.Parse();
             if (isOK)
             {
@@ -134,7 +138,7 @@ public class TCPServer : IDisposable
                 await UniTask.Yield();
                 try
                 {
-                    EventManager.Invoke(JsonUtility.FromJson<Message>(request)); // 这里必须使用Try catch ，避免这条语句触发异常被外部捕捉而导致网络意外断开
+                    EventManager.Invoke(JsonUtility.FromJson<Message>(request)); // 这里必须使用Try catch ，避免用户逻辑异常被外部捕捉而导致网络意外断开
                 }
                 catch (Exception e)
                 {
@@ -171,7 +175,6 @@ public class TCPServer : IDisposable
                 byte[] size = BytesHelper.GetBytes((ushort)data.Length); //简易封包协议：包长度+包体
                 var temp = new byte[size.Length + data.Length];
                 Buffer.BlockCopy(size, 0, temp, 0, size.Length);
-                Debug.Log($"{nameof(TCPServer)}: {data.Length}");
                 Buffer.BlockCopy(data, 0, temp, size.Length, data.Length);
                 c.GetStream().Write(temp, 0, temp.Length);
                 c.GetStream().Flush();
@@ -217,5 +220,18 @@ public class TCPServer : IDisposable
             }
         }
         return output;
+    }
+}
+/// <summary>
+/// TcpClient.Connected: 属性获取截止到最后一次 I/O 操作时的 Client 套接字的连接状态。
+/// C# TcpClient在连接成功后，对方关闭了网络连接是不能及时的检测到断开的，
+/// 故而使用此扩展检测连接状态
+/// </summary>
+public static class TcpClientEx
+{
+
+    public static bool IsOnline(this TcpClient c)
+    {
+        return !((c.Client.Poll(1000, SelectMode.SelectRead) && (c.Client.Available == 0)) || !c.Client.Connected);
     }
 }
